@@ -9,9 +9,10 @@ edition = "2018"
 [dependencies]
 tract-tensorflow = "^0.13"
 tract-core = "^0.13"
-ndarray = "^0.13"
 thiserror = "^1.0"
-rand = "*"
+serde_json = "^1.0"
+serde = "^1.0"
+mfcc = {git="https://github.com/syntacticsugarglider/mfcc"}
 
 [dev-dependencies]
 hound = "^3.4"
