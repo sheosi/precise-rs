@@ -87,7 +87,6 @@ impl PreciseParams {
 
 pub struct ThresholdDecoder {
     min_out: i32,
-    max_out: i32,
     out_range: i32,
     cd: (f32, f32),
     center: f32
@@ -113,7 +112,6 @@ impl ThresholdDecoder {
 
         Self{
             min_out,
-            max_out,
             out_range: max_out - min_out,
             cd,
             center
@@ -181,15 +179,15 @@ pub struct Precise {
 }
 
 impl Precise {
-    pub fn new(model_path: &Path) -> Result<Self, PreciseError> {
+    pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
         let tf = tensorflow();
-        let model = tf.model_for_path(model_path)?;
+        let model = tf.model_for_path(model_path.as_ref())?;
         let model = model
-        .with_input_names(&["import/net_input"])?
-        .with_output_names(&["import/net_output"])?
+        .with_input_names(&["net_input"])?
+        .with_output_names(&["net_output"])?
         .into_optimized()?
         .into_runnable()?;
-        let params = Self::load_params(model_path)?;
+        let params = Self::load_params(model_path.as_ref())?;
         let mfccs = Array::zeros((params.n_features() as usize, params.n_mfcc as usize));
         let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, -4);
         
@@ -241,14 +239,16 @@ impl Precise {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use super::Precise;
-    #[test]
-    fn it_works() {
-        let path = Path::new("test.wav");
-        let mut precise = Precise::new(Path::new("hey-microft.pb")).unwrap();
-        let mut reader = hound::WavReader::open(path).unwrap();
+
+    fn load_samples() -> Vec<i16> {
+        let mut reader = hound::WavReader::open("test.wav").unwrap();
         let samples: Vec<i16> = reader.samples().map(|e|e.unwrap()).collect();
-        println!("{:?}", precise.update(&samples).unwrap());
+        samples
+    }
+    #[test]
+    fn test_positive() {
+        let mut precise = Precise::new("hey-mycroft.pb").unwrap();
+        println!("{:?}", precise.update(&load_samples()).unwrap());
     }
 }
