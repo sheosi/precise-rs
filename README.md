@@ -17,6 +17,22 @@ tract-precise = {git = "https://github.com/sheosi/tract-precise"}
 
 TODO
 
+# Obtaining the code
+
+This uses git LFS which means it needs to be cloned with that installed and ready beforehand.
+
+First install git LFS, for Debian/Ubuntu it is:
+
+```shell
+sudo apt install git-lfs
+```
+
+Then, no matter which OS you are under you need to initialize git LFS:
+
+```shell
+git lfs install
+```
+
 # License 
 Licensed under Apache License, Version 2.0, (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0).
 
