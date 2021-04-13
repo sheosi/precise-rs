@@ -3,6 +3,12 @@ name = "tract-precise"
 version = "0.1.0"
 authors = ["sheosi <sertorbe@gmail.com>"]
 edition = "2018"
+license = "Apache-2.0"
+description = "Reimplementation of the precise hotword engine on Tract"
+homepage = "https://github.com/sheosi/tract-precise"
+repository = "https://github.com/sheosi/tract-precise"
+keywords = ["hotword", "precise", "mycroft", "wake", "tract"]
+categories = ["multimedia::audio"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
