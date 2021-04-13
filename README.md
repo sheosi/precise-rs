@@ -1,8 +1,8 @@
 # Tract-precise
 
-A reimplementation of the [precise] (https://github.com/MycroftAI/mycroft-precise)
+A reimplementation of the [precise](https://github.com/MycroftAI/mycroft-precise)
 by [Mycroft](https://mycroft.ai) hotword listener (just the decoder, though) 
-using [Rust](https://www.rust-lang.org/) and [Tract] (https://github.com/sonos/tract).
+using [Rust](https://www.rust-lang.org/) and [Tract](https://github.com/sonos/tract).
 
 # Usage
 
