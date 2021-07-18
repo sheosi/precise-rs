@@ -1,5 +1,5 @@
 [package]
-name = "tract-precise"
+name = "precise-rs"
 version = "0.1.0"
 authors = ["sheosi <sertorbe@gmail.com>"]
 edition = "2018"
@@ -14,11 +14,11 @@ exclude = ["hey-mycroft.pb", "hey-mycroft.pb.params", "test.wav"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tract-tensorflow = "^0.13"
-tract-core = "^0.13"
+tensorflow = {version="^0.17", features=["ndarray"]}
+ndarray = "^0.15"
 thiserror = "^1.0"
 serde_json = "^1.0"
-serde = "^1.0"
+serde = {version="^1.0", features=["derive"]}
 mfcc = {git="https://github.com/syntacticsugarglider/mfcc"}
 
 [dev-dependencies]
