@@ -93,6 +93,7 @@ pub struct ThresholdDecoder {
 
 impl ThresholdDecoder {
     fn new(mu_stds: Vec<(f32,f32)>, center: f32, resolution: u32, min_z: i8, max_z: i8 ) -> Self {
+        println!("mu_stds: {:?}", &mu_stds);
         let min_out =  mu_stds.iter().map(|(mu,std)|mu + min_z as f32 * std).min_by(
             |a,b| a.partial_cmp(b).expect("Tried to compare a NaN")
         ).unwrap() as i32;
@@ -131,6 +132,7 @@ impl ThresholdDecoder {
     }
 
     fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> (f32, f32) {
+        println!("min_out: {}, max_out: {}, out_range: {}", min_out, max_out, out_range);
         let points = Array::linspace(min_out, max_out, resolution as usize * out_range);
         let ms_len = mu_stds.len()  as f32;
         let pdf = mu_stds.into_iter().map(|(mu,std)|Self::pdf(points.clone(), mu, std)).fold((0.0,0.0),|(a1, a2),x| (a1 + x[0], a2 + x[1]));
@@ -192,7 +194,7 @@ impl Precise {
     }
 
     fn load_params(model: &Path) -> Result<PreciseParams, PreciseError> {
-        let file = File::open(model.with_extension(".pb.params")).unwrap();
+        let file = File::open(model.with_extension("pb.params")).unwrap();
         Ok(from_reader(BufReader::new(file)).unwrap())
     }
 
