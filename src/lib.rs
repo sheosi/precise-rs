@@ -1,26 +1,24 @@
 use std::f32::consts::{E, PI};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{Read, BufReader};
 use std::path::Path;
 
 use serde_json::from_reader;
 use serde::{Deserialize, Serialize};
 use mfcc::Transform;
-use tract_ndarray::{Array, Array2, ArrayBase, Dim, OwnedRepr, s};
-use tract_tensorflow::prelude::*;
-use tract_core::TractError;
+use ndarray::{Array, Array2, ArrayBase, Dim, OwnedRepr, s};
+use tensorflow::{Graph, ImportGraphDefOptions, Session, SessionOptions, SessionRunArgs, Tensor};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PreciseError {
+    #[error("Couldn't open model file")]
+    FileError(#[from]std::io::Error),
     #[error("Failure while operating model")]
-    ModelError(#[from] TractError),
-
-    #[error("With shape")]
-    ShapeErrror(#[from]tract_ndarray::ShapeError)
+    TensorflowError(#[from]tensorflow::Status),
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 struct PreciseParams {
     #[serde(default = "buffer_t_default")]
     buffer_t: f32,
@@ -85,6 +83,7 @@ impl PreciseParams {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ThresholdDecoder {
     min_out: i32,
     out_range: i32,
@@ -170,8 +169,9 @@ impl ThresholdDecoder {
     }
 }
 
+#[derive(Debug)]
 pub struct Precise {
-    model: SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
+    graph: Graph,
     mfccs: Array2<f32>,
     params: PreciseParams,
     decoder: ThresholdDecoder,
@@ -180,18 +180,15 @@ pub struct Precise {
 
 impl Precise {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
-        let tf = tensorflow();
-        let model = tf.model_for_path(model_path.as_ref())?;
-        let model = model
-        .with_input_names(&["net_input"])?
-        .with_output_names(&["net_output"])?
-        .into_optimized()?
-        .into_runnable()?;
+        let mut graph = Graph::new();
+        let mut proto = Vec::new();
+        File::open(&model_path)?.read_to_end(&mut proto)?;
+        graph.import_graph_def(&proto, &ImportGraphDefOptions::new())?;
+    
         let params = Self::load_params(model_path.as_ref())?;
-        let mfccs = Array::zeros((params.n_features() as usize, params.n_mfcc as usize));
         let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, -4);
-        
-        Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
+        let mfccs = Array::zeros((params.n_features() as usize, params.n_mfcc as usize));
+        Ok(Self{graph, mfccs, params, decoder, window_audio: Vec::new()})
     }
 
     fn load_params(model: &Path) -> Result<PreciseParams, PreciseError> {
@@ -211,7 +208,6 @@ impl Precise {
 
     fn update_vectors(&mut self, stream: &[i16]) -> Array2<f32> {
         self.window_audio.extend(stream.iter().cloned());
-        
         if self.window_audio.len() >= self.params.window_samples() as usize {
             let mut new_features = self.vectorize_raw(self.window_audio.clone());
             self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec();
@@ -226,13 +222,21 @@ impl Precise {
 
 
     pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
-        let mfccs = self.update_vectors(audio).into_tensor();
+        
+        let mfccs = self.update_vectors(audio);
+        let input = Tensor::from(mfccs);
+        
+        let session = Session::new(&SessionOptions::new(), &self.graph)?;
 
-        let result = self.model.run(tvec![mfccs])?[0].nth(0)?;
-        let raw_out = result.to_array_view::<f32>()?[0];
+        let mut args = SessionRunArgs::new();
+        args.add_feed(&self.graph.operation_by_name_required("net_input")?, 0, &input);
+        let out = args.request_fetch(&self.graph.operation_by_name_required("net_output")?, 0);
+        session.run(&mut args)?;
+        
+        let raw_out: f32 = args.fetch(out)?[0];
         
         let out = self.decoder.decode(raw_out);
-        println!("raw: {:?}, decoded: {:?}, all_res: {:?}", raw_out, out, result);
+        println!("raw: {:?}, decoded: {:?}, session: {:?}", raw_out, out, session);
         Ok(out)
     }
 }
