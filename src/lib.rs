@@ -6,8 +6,9 @@ use std::path::Path;
 use serde_json::from_reader;
 use serde::{Deserialize, Serialize};
 use mfcc::Transform;
-use ndarray::{Array, Array2, ArrayBase, Dim, OwnedRepr, s};
-use tensorflow::{Graph, ImportGraphDefOptions, Session, SessionOptions, SessionRunArgs, Tensor};
+use tract_ndarray::{Array, Array2, ArrayBase, Dim, OwnedRepr, s};
+use tract_onnx::prelude::*;
+use tract_core::TractError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,7 +16,9 @@ pub enum PreciseError {
     #[error("Couldn't open model file")]
     FileError(#[from]std::io::Error),
     #[error("Failure while operating model")]
-    TensorflowError(#[from]tensorflow::Status),
+    ModelError(#[from] TractError),
+    #[error("With shape")]
+    ShapeErrror(#[from]tract_ndarray::ShapeError)
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -173,7 +176,7 @@ impl ThresholdDecoder {
 
 #[derive(Debug)]
 pub struct Precise {
-    graph: Graph,
+    model: SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
     mfccs: Array2<f32>,
     params: PreciseParams,
     decoder: ThresholdDecoder,
@@ -182,15 +185,18 @@ pub struct Precise {
 
 impl Precise {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
-        let mut graph = Graph::new();
-        let mut proto = Vec::new();
-        File::open(&model_path)?.read_to_end(&mut proto)?;
-        graph.import_graph_def(&proto, &ImportGraphDefOptions::new())?;
+        let onnx = onnx();
+        let model = onnx.model_for_path(model_path.as_ref())?;
+        let model = model
+        .with_input_names(&["net_input:0"])?
+        .with_output_names(&["net_output:0"])?
+        .into_optimized()?
+        .into_runnable()?;
     
         let params = Self::load_params(model_path.as_ref())?;
         let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, -4);
         let mfccs = Array::zeros((params.n_features() as usize, params.n_mfcc as usize));
-        Ok(Self{graph, mfccs, params, decoder, window_audio: Vec::new()})
+        Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
     }
 
     fn load_params(model: &Path) -> Result<PreciseParams, PreciseError> {
@@ -228,17 +234,11 @@ impl Precise {
         let mfccs = self.update_vectors(audio);
         let input = Tensor::from(mfccs);
         
-        let session = Session::new(&SessionOptions::new(), &self.graph)?;
-
-        let mut args = SessionRunArgs::new();
-        args.add_feed(&self.graph.operation_by_name_required("net_input")?, 0, &input);
-        let out = args.request_fetch(&self.graph.operation_by_name_required("net_output")?, 0);
-        session.run(&mut args)?;
-        
-        let raw_out: f32 = args.fetch(out)?[0];
+        let result = self.model.run(tvec![input])?[0].nth(0)?;
+        let raw_out = result.to_array_view::<f32>()?[0];
         
         let out = self.decoder.decode(raw_out);
-        println!("raw: {:?}, decoded: {:?}, session: {:?}", raw_out, out, session);
+        println!("raw: {:?}, decoded: {:?}", raw_out, out);
         Ok(out)
     }
 }
@@ -254,7 +254,7 @@ mod tests {
     }
     #[test]
     fn test_positive() {
-        let mut precise = Precise::new("hey-mycroft.pb").unwrap();
+        let mut precise = Precise::new("model.onnx").unwrap();
         println!("{:?}", precise.update(&load_samples()).unwrap());
     }
 }
