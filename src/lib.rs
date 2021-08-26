@@ -1,13 +1,14 @@
 use std::f32::consts::{E, PI};
 use std::fs::File;
-use std::io::{Read, BufReader};
+use std::io::BufReader;
 use std::path::Path;
 
 use serde_json::from_reader;
 use serde::{Deserialize, Serialize};
 use mfcc::Transform;
-use ndarray::{Array, Array2, ArrayBase, Dim, OwnedRepr, s};
-use tensorflow::{Graph, ImportGraphDefOptions, Session, SessionOptions, SessionRunArgs, Tensor};
+use ndarray::{Array, Array2, ArrayBase, Axis, Dim, OwnedRepr, s};
+use tflite::ops::builtin::BuiltinOpResolver;
+use tflite::{FlatBufferModel, InterpreterBuilder};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,7 +16,9 @@ pub enum PreciseError {
     #[error("Couldn't open model file")]
     FileError(#[from]std::io::Error),
     #[error("Failure while operating model")]
-    TensorflowError(#[from]tensorflow::Status),
+    TensorflowError(#[from]tflite::Error),
+    #[error("Model is wrong")]
+    ModelError
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -87,13 +90,13 @@ impl PreciseParams {
 pub struct ThresholdDecoder {
     min_out: i32,
     out_range: i32,
-    cd: (f32, f32),
+    cd: ArrayBase<OwnedRepr<f32>, Dim<[usize; 1]>>,
     center: f32
 }
 
 impl ThresholdDecoder {
     fn new(mu_stds: Vec<(f32,f32)>, center: f32, resolution: u32, min_z: i8, max_z: i8 ) -> Self {
-        println!("mu_stds: {:?}", &mu_stds);
+        println!("mu_stds: {:?} max_z: {:?} min_z: {:?}", &mu_stds, max_z, min_z);
         let min_out =  mu_stds.iter().map(|(mu,std)|mu + min_z as f32 * std).min_by(
             |a,b| a.partial_cmp(b).expect("Tried to compare a NaN")
         ).unwrap() as i32;
@@ -102,13 +105,14 @@ impl ThresholdDecoder {
         ).unwrap() as i32;
 
 
-        let (a,b) = Self::calc_pd(mu_stds,
+        let mut cd = Self::calc_pd(mu_stds,
             resolution as f32,
             min_out as f32,
             max_out as f32,
             (max_out - min_out) as usize
         );
-        let cd = (a, a+b);
+
+        cd.accumulate_axis_inplace(Axis(0), |&prev, curr| *curr += prev);
 
         Self{
             min_out,
@@ -120,10 +124,14 @@ impl ThresholdDecoder {
 
     fn pdf(x: ArrayBase<OwnedRepr<f32>, Dim<[usize;1]>>, mu: f32, std: f32) -> ArrayBase<OwnedRepr<f32>, Dim<[usize;1]>> {
         if std == 0.0 {
-            x *0.0
+            x * 0.0
         }
         else {
-            (1.0 / (std * (2.0 * PI).sqrt())) * (-(x - mu).mapv(|v|v.powf(2.0 / (2.0 * std.powf(2.0)))).mapv(|v|v.exp()))
+            let a1 = 1.0 / (std * (2.0 * PI).sqrt());
+            
+            let b1 =  (x - mu).mapv(|v|v.powf(2.0));
+            let b2 =  -b1 / (2.0 * std.powf(2.0));
+            a1 * (b2.mapv(|v|v.exp()))
         }
     }
 
@@ -131,13 +139,17 @@ impl ThresholdDecoder {
         -(1.0 / (x - 1.0).log(E))
     }
 
-    fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> (f32, f32) {
-        println!("min_out: {}, max_out: {}, out_range: {}", min_out, max_out, out_range);
+    fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> ArrayBase<OwnedRepr<f32>, Dim<[usize; 1]>> {
+        println!("resolution: {}, min_out: {}, max_out: {}, out_range: {}",  resolution ,min_out, max_out, out_range);
         let points = Array::linspace(min_out, max_out, resolution as usize * out_range);
-        let ms_len = mu_stds.len()  as f32;
-        let pdf = mu_stds.into_iter().map(|(mu,std)|Self::pdf(points.clone(), mu, std)).fold((0.0,0.0),|(a1, a2),x| (a1 + x[0], a2 + x[1]));
-        let apply = |v|v as f32/(resolution * ms_len);
-        (apply(pdf.0), apply(pdf.1))
+        let len_mu_stds = mu_stds.len() as f32; // Save this early, we are moving the data later
+
+        let res = Array::zeros(points.dim());
+        let pdf = mu_stds.into_iter()
+            .map(|(mu,std)|Self::pdf(points.clone(), mu, std))
+            .fold(res,|res,x| res + x);
+
+        pdf/(resolution * len_mu_stds)
     }
 
     pub fn decode(&self, raw_output: f32) -> f32 {
@@ -152,12 +164,7 @@ impl ThresholdDecoder {
                 let ratio = (Self::asigmoid(raw_output) - self.min_out as f32) / self.out_range as f32;
                 let ratio = ratio.max(0.0).min(1.0);
                 let len_cd = 2.0; // Change if cd size changes
-                if (ratio * (len_cd - 1.0) + 0.5) == 0.0{
-                    self.cd.0
-                }
-                else {
-                    self.cd.1
-                }
+                self.cd[( (ratio * (len_cd - 1.0)) + 0.5) as usize]
             };
 
             if cp < self.center {
@@ -171,9 +178,9 @@ impl ThresholdDecoder {
     }
 }
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct Precise {
-    graph: Graph,
+    model: FlatBufferModel,
     mfccs: Array2<f32>,
     params: PreciseParams,
     decoder: ThresholdDecoder,
@@ -182,15 +189,12 @@ pub struct Precise {
 
 impl Precise {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
-        let mut graph = Graph::new();
-        let mut proto = Vec::new();
-        File::open(&model_path)?.read_to_end(&mut proto)?;
-        graph.import_graph_def(&proto, &ImportGraphDefOptions::new())?;
+        let model = FlatBufferModel::build_from_file(model_path.as_ref())?;
     
         let params = Self::load_params(model_path.as_ref())?;
-        let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, -4);
+        let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
         let mfccs = Array::zeros((params.n_features() as usize, params.n_mfcc as usize));
-        Ok(Self{graph, mfccs, params, decoder, window_audio: Vec::new()})
+        Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
     }
 
     fn load_params(model: &Path) -> Result<PreciseParams, PreciseError> {
@@ -224,21 +228,34 @@ impl Precise {
 
 
     pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
-        
-        let mfccs = self.update_vectors(audio);
-        let input = Tensor::from(mfccs);
-        
-        let session = Session::new(&SessionOptions::new(), &self.graph)?;
+        const ERR_MFCC: &str = "MFCC data is not contiguous or not in standard order";
 
-        let mut args = SessionRunArgs::new();
-        args.add_feed(&self.graph.operation_by_name_required("net_input")?, 0, &input);
-        let out = args.request_fetch(&self.graph.operation_by_name_required("net_output")?, 0);
-        session.run(&mut args)?;
+        // Do this first so that we are not borrowed mutable twice
+        let mfccs = self.update_vectors(audio);
+
+        let resolver = BuiltinOpResolver::default();
+        let builder = InterpreterBuilder::new(&self.model, &resolver)?;
+        let mut interpreter = builder.build()?;
+
+        interpreter.allocate_tensors()?;
+
+        let inputs = interpreter.inputs().to_vec();
+        let input_index = inputs[0];
+
+        let outputs = interpreter.outputs().to_vec();
+        let output_index = outputs[0];
+
+        /*let input_tensor = interpreter.tensor_info(input_index).ok_or(PreciseError::ModelError)?;
+        let output_tensor = interpreter.tensor_info(output_index).ok_or(PreciseError::ModelError)?;*/
+
+        interpreter.tensor_data_mut(input_index)?[0..mfccs.len()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
+
+        interpreter.invoke()?;
+
+        let raw_out: &[f32] = interpreter.tensor_data(output_index)?;
         
-        let raw_out: f32 = args.fetch(out)?[0];
-        
-        let out = self.decoder.decode(raw_out);
-        println!("raw: {:?}, decoded: {:?}, session: {:?}", raw_out, out, session);
+        let out = self.decoder.decode(raw_out[0]);
+        println!("raw: {:?}, decoded: {:?}", raw_out, out);
         Ok(out)
     }
 }
@@ -254,7 +271,7 @@ mod tests {
     }
     #[test]
     fn test_positive() {
-        let mut precise = Precise::new("hey-mycroft.pb").unwrap();
+        let mut precise = Precise::new("jarvis_S_B.tflite").unwrap();
         println!("{:?}", precise.update(&load_samples()).unwrap());
     }
 }
