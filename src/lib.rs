@@ -258,6 +258,11 @@ impl Precise {
         println!("raw: {:?}, decoded: {:?}", raw_out, out);
         Ok(out)
     }
+    
+    pub fn clear(&mut self) {
+        self.window_audio.clear();
+        self.mfccs = Array::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
+    }
 }
 
 #[cfg(test)]
