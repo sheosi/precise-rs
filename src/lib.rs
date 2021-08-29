@@ -205,9 +205,11 @@ impl Precise {
     fn vectorize_raw(&self, raw: Vec<i16>) -> Vec<f32> {
         let mut trans = Transform::new(
             self.params.sample_rate as usize,
-            self.params.window_samples() as usize
+            raw.len()
         );
         let mut out = Vec::new();
+        out.resize(48, 0.0);
+
         trans.transform(raw.as_slice(), &mut out);
         out.into_iter().map(|f|f as f32).collect()
     }
@@ -216,7 +218,7 @@ impl Precise {
         self.window_audio.extend(stream.iter().cloned());
         if self.window_audio.len() >= self.params.window_samples() as usize {
             let mut new_features = self.vectorize_raw(self.window_audio.clone());
-            self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec();
+            self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec(); // Remove old samples
             if new_features.len() > self.mfccs.len() {
                 new_features = new_features[new_features.len() - self.mfccs.len()..].to_vec();
             }
@@ -258,7 +260,7 @@ impl Precise {
         println!("raw: {:?}, decoded: {:?}", raw_out, out);
         Ok(out)
     }
-    
+
     pub fn clear(&mut self) {
         self.window_audio.clear();
         self.mfccs = Array::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
