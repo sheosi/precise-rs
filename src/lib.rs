@@ -96,7 +96,6 @@ pub struct ThresholdDecoder {
 
 impl ThresholdDecoder {
     fn new(mu_stds: Vec<(f32,f32)>, center: f32, resolution: u32, min_z: i8, max_z: i8 ) -> Self {
-        println!("mu_stds: {:?} max_z: {:?} min_z: {:?}", &mu_stds, max_z, min_z);
         let min_out =  mu_stds.iter().map(|(mu,std)|mu + min_z as f32 * std).min_by(
             |a,b| a.partial_cmp(b).expect("Tried to compare a NaN")
         ).unwrap() as i32;
@@ -140,7 +139,6 @@ impl ThresholdDecoder {
     }
 
     fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> ArrayBase<OwnedRepr<f32>, Dim<[usize; 1]>> {
-        println!("resolution: {}, min_out: {}, max_out: {}, out_range: {}",  resolution ,min_out, max_out, out_range);
         let points = Array::linspace(min_out, max_out, resolution as usize * out_range);
         let len_mu_stds = mu_stds.len() as f32; // Save this early, we are moving the data later
 
@@ -219,8 +217,8 @@ impl Precise {
         if self.window_audio.len() >= self.params.window_samples() as usize {
             let mut new_features = self.vectorize_raw(self.window_audio.clone());
             self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec(); // Remove old samples
-            if new_features.len() > self.mfccs.len() {
-                new_features = new_features[new_features.len() - self.mfccs.len()..].to_vec();
+            if new_features.len() > self.mfccs.dim().0 {
+                new_features = new_features[new_features.len() - self.mfccs.dim().0..].to_vec();
             }
             self.mfccs = self.mfccs.slice(s![new_features.len()..,..]).to_owned();//self.mfccs.unwrap()[new_features.len()..].to_vec().extend(new_features.iter().cloned());
         }
@@ -257,7 +255,6 @@ impl Precise {
         let raw_out: &[f32] = interpreter.tensor_data(output_index)?;
         
         let out = self.decoder.decode(raw_out[0]);
-        println!("raw: {:?}, decoded: {:?}", raw_out, out);
         Ok(out)
     }
 
