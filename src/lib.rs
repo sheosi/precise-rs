@@ -161,7 +161,7 @@ impl ThresholdDecoder {
             else {
                 let ratio = (Self::asigmoid(raw_output) - self.min_out as f32) / self.out_range as f32;
                 let ratio = ratio.max(0.0).min(1.0);
-                let len_cd = 2.0; // Change if cd size changes
+                let len_cd = self.cd.len() as f32; // Change if cd size changes
                 self.cd[( (ratio * (len_cd - 1.0)) + 0.5) as usize]
             };
 
@@ -275,7 +275,7 @@ mod tests {
     }
     #[test]
     fn test_positive() {
-        let mut precise = Precise::new("jarvis_S_B.tflite").unwrap();
+        let mut precise = Precise::new("hey_mycroft.tflite").unwrap();
         println!("{:?}", precise.update(&load_samples()).unwrap());
     }
 }
