@@ -189,20 +189,20 @@ impl ThresholdDecoder {
     }
 }
 
-//#[derive(Debug)]
 pub struct Precise {
-    model: FlatBufferModel,
+    model: PreciseModel,
     mfccs: Array2<f32>,
     params: PreciseParams,
     decoder: ThresholdDecoder,
     window_audio: Vec<i16>
 }
 
+
 impl Precise {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
-        let model = FlatBufferModel::build_from_file(model_path.as_ref())?;
-    
         let params = Self::load_params(model_path.as_ref())?;
+
+        let model = PreciseModel::new(model_path)?;
         let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
         let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize));
         Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
@@ -260,10 +260,29 @@ impl Precise {
 
 
     pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
-        const ERR_MFCC: &str = "MFCC data is not contiguous or not in standard order";
-
         // Do this first so that we are not borrowed mutable twice
         let mfccs = self.update_vectors(audio);
+        let out = self.decoder.decode(self.model.predict(&mfccs)?);
+        Ok(out)
+    }
+
+    pub fn clear(&mut self) {
+        self.window_audio.clear();
+        self.mfccs = Array2::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
+    }
+}
+
+struct PreciseModel {
+    model: FlatBufferModel,
+}
+
+impl PreciseModel {
+    fn new<P: AsRef<Path>>(model: P) -> Result<Self, PreciseError> {
+        Ok(Self {model: FlatBufferModel::build_from_file(model.as_ref())?})
+    }
+
+    fn predict(&mut self, mfccs: &Array2<f32>) -> Result<f32, PreciseError> {
+        const ERR_MFCC: &str = "MFCC data is not contiguous or not in standard order";
 
         let resolver = BuiltinOpResolver::default();
         let builder = InterpreterBuilder::new(&self.model, &resolver)?;
@@ -277,22 +296,12 @@ impl Precise {
         let outputs = interpreter.outputs().to_vec();
         let output_index = outputs[0];
 
-        /*let input_tensor = interpreter.tensor_info(input_index).ok_or(PreciseError::ModelError)?;
-        let output_tensor = interpreter.tensor_info(output_index).ok_or(PreciseError::ModelError)?;*/
-
         interpreter.tensor_data_mut(input_index)?[0..mfccs.len()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
 
         interpreter.invoke()?;
 
         let raw_out: &[f32] = interpreter.tensor_data(output_index)?;
-        
-        let out = self.decoder.decode(raw_out[0]);
-        Ok(out)
-    }
-
-    pub fn clear(&mut self) {
-        self.window_audio.clear();
-        self.mfccs = Array2::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
+        Ok(raw_out[0])
     }
 }
 
