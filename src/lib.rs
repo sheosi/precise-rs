@@ -258,7 +258,7 @@ impl ThresholdDecoder {
             else {
                 let ratio = (Self::asigmoid(raw_output) - self.min_out as f32) / self.out_range as f32;
                 let ratio = ratio.max(0.0).min(1.0);
-                let len_cd = self.cd.len() as f32; // Change if cd size changes
+                let len_cd = self.cd.len() as f32;
                 self.cd[( (ratio * (len_cd - 1.0)) + 0.5) as usize]
             };
 

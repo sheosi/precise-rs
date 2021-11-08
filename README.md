@@ -1,8 +1,10 @@
-# Tract-precise
+# Precise-rs
 
 A reimplementation of the [precise](https://github.com/MycroftAI/mycroft-precise)
 by [Mycroft](https://mycroft.ai) hotword listener (just the decoder, though) 
-using [Rust](https://www.rust-lang.org/) and [Tract](https://github.com/sonos/tract).
+using [Rust](https://www.rust-lang.org/) and [tflite-rs](https://github.com/boncheolgu/tflite-rs).
+
+**NOTE:** While precise accepts three vectorizer operations *precise-rs* only replicates what the original names as `mfcc` as of now.
 
 # Usage
 
@@ -13,9 +15,26 @@ Add this to your `Cargo.toml`
 tract-precise = {git = "https://github.com/sheosi/tract-precise"}
 ```
 
+# Example
+
+```rust
+use precise_rs::Precise;
+
+fn main() {
+    let hotword_engine = Precise::new("my_precise_model.tflite");
+    let audio_input: &[i16] = get_audio_input();
+    let confidence = hotword_engine.update(audio_input);
+    if (confidence > 0.8) {
+        println!("Heard someone!!");
+    }
+}
+```
+
+**NOTE:** Remember to also have `my_precise_model.tflite.params` next to `my_precise_model.tflite`.
+
 # How it works
 
-TODO
+This is pretty much a reimplementation of the original [code](https://github.com/MycroftAI/mycroft-precise), it loads the model and gets the mfccs
 
 # Obtaining the code
 
