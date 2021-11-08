@@ -90,6 +90,90 @@ impl PreciseParams {
     }
 }
 
+pub struct Precise {
+    model: PreciseModel,
+    mfccs: Array2<f32>,
+    params: PreciseParams,
+    decoder: ThresholdDecoder,
+    window_audio: Vec<i16>
+}
+
+
+impl Precise {
+    pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
+        let params = Self::load_params(model_path.as_ref())?;
+
+        let model = PreciseModel::new(model_path)?;
+        let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
+        let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize));
+        Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
+    }
+
+    fn load_params(model: &Path) -> Result<PreciseParams, PreciseError> {
+        let file = File::open(model.with_extension("tflite.params")).map_err(PreciseError::ParamsLoadError)?;
+        from_reader(BufReader::new(file)).map_err(PreciseError::ParamsJsonError)
+    }
+
+    fn vectorize_raw(&self, raw: Vec<i16>) -> Array2<f32> {
+        const CHUNK_MS: u32 = 10;
+        const OUT_MEL_SAMPLES: usize = 20;
+        
+        let samples = ((self.params.sample_rate as u32 * CHUNK_MS ) / 1000) as usize;
+        let chunks =raw.chunks(samples);
+        let mut trans = Transform::new(
+            self.params.sample_rate as usize,
+            samples
+        ).nfilters(OUT_MEL_SAMPLES, 40)
+        .normlength(10);
+
+        let mels = chunks.map::<Vec<_>,_>(|c|{
+            let mut out = vec![0.0; OUT_MEL_SAMPLES * 3];
+            if c.len() == samples {
+                trans.transform(c, &mut out);
+            }
+            else { // Needed for the last one
+                let mut s = c.to_vec();
+                s.resize(samples, 0);
+                trans.transform(&s, &mut out);
+            }
+            out.into_iter().map(|f|f as f32).collect()
+        }).flatten().collect::<Vec<f32>>();
+        let num_sets = (mels.len() as f32/(OUT_MEL_SAMPLES) as f32).ceil() as usize;
+
+        Array2::from_shape_vec((num_sets, OUT_MEL_SAMPLES), mels).unwrap()
+        
+    }
+
+    fn update_vectors(&mut self, stream: &[i16]) -> Array2<f32> {
+        self.window_audio.extend(stream.iter().cloned());
+        if self.window_audio.len() >= self.params.window_samples() as usize {
+            let mut new_features = self.vectorize_raw(self.window_audio.clone());
+            self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec(); // Remove old samples
+            if new_features.len() > self.mfccs.dim().0 {
+                new_features = new_features.slice(s![new_features.len() - self.mfccs.dim().0..,..]).to_owned();
+            }
+
+            self.mfccs = concatenate![Axis(0), self.mfccs.slice(s![new_features.len()..,..]).to_owned(), new_features];
+        }
+
+        self.mfccs.clone()
+    }
+
+
+    pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
+        // Do this first so that we are not borrowed mutable twice
+        let mfccs = self.update_vectors(audio);
+        let out = self.decoder.decode(self.model.predict(&mfccs)?);
+        Ok(out)
+    }
+
+    pub fn clear(&mut self) {
+        self.window_audio.clear();
+        self.mfccs = Array2::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
+    }
+}
+
+
 #[derive(Debug, Clone)]
 pub(crate) struct ThresholdDecoder {
     min_out: i32,
@@ -186,89 +270,6 @@ impl ThresholdDecoder {
             }
 
         }
-    }
-}
-
-pub struct Precise {
-    model: PreciseModel,
-    mfccs: Array2<f32>,
-    params: PreciseParams,
-    decoder: ThresholdDecoder,
-    window_audio: Vec<i16>
-}
-
-
-impl Precise {
-    pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
-        let params = Self::load_params(model_path.as_ref())?;
-
-        let model = PreciseModel::new(model_path)?;
-        let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
-        let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize));
-        Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
-    }
-
-    fn load_params(model: &Path) -> Result<PreciseParams, PreciseError> {
-        let file = File::open(model.with_extension("tflite.params")).map_err(PreciseError::ParamsLoadError)?;
-        from_reader(BufReader::new(file)).map_err(PreciseError::ParamsJsonError)
-    }
-
-    fn vectorize_raw(&self, raw: Vec<i16>) -> Array2<f32> {
-        const CHUNK_MS: u32 = 10;
-        const OUT_MEL_SAMPLES: usize = 20;
-        
-        let samples = ((self.params.sample_rate as u32 * CHUNK_MS ) / 1000) as usize;
-        let chunks =raw.chunks(samples);
-        let mut trans = Transform::new(
-            self.params.sample_rate as usize,
-            samples
-        ).nfilters(OUT_MEL_SAMPLES, 40)
-        .normlength(10);
-
-        let mels = chunks.map::<Vec<_>,_>(|c|{
-            let mut out = vec![0.0; OUT_MEL_SAMPLES * 3];
-            if c.len() == samples {
-                trans.transform(c, &mut out);
-            }
-            else { // Needed for the last one
-                let mut s = c.to_vec();
-                s.resize(samples, 0);
-                trans.transform(&s, &mut out);
-            }
-            out.into_iter().map(|f|f as f32).collect()
-        }).flatten().collect::<Vec<f32>>();
-        let num_sets = (mels.len() as f32/(OUT_MEL_SAMPLES) as f32).ceil() as usize;
-
-        Array2::from_shape_vec((num_sets, OUT_MEL_SAMPLES), mels).unwrap()
-        
-    }
-
-    fn update_vectors(&mut self, stream: &[i16]) -> Array2<f32> {
-        self.window_audio.extend(stream.iter().cloned());
-        if self.window_audio.len() >= self.params.window_samples() as usize {
-            let mut new_features = self.vectorize_raw(self.window_audio.clone());
-            self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec(); // Remove old samples
-            if new_features.len() > self.mfccs.dim().0 {
-                new_features = new_features.slice(s![new_features.len() - self.mfccs.dim().0..,..]).to_owned();
-            }
-
-            self.mfccs = concatenate![Axis(0), self.mfccs.slice(s![new_features.len()..,..]).to_owned(), new_features];
-        }
-
-        self.mfccs.clone()
-    }
-
-
-    pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
-        // Do this first so that we are not borrowed mutable twice
-        let mfccs = self.update_vectors(audio);
-        let out = self.decoder.decode(self.model.predict(&mfccs)?);
-        Ok(out)
-    }
-
-    pub fn clear(&mut self) {
-        self.window_audio.clear();
-        self.mfccs = Array2::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
     }
 }
 
