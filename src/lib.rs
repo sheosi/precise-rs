@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::from_reader;
 use serde::{Deserialize, Serialize};
 use mfcc::Transform;
-use ndarray::{Array, Array2, ArrayBase, Axis, Dim, OwnedRepr, s};
+use ndarray::{Array1, Array2, Axis, concatenate, s, stack};
 use tflite::ops::builtin::BuiltinOpResolver;
 use tflite::{FlatBufferModel, InterpreterBuilder};
 use thiserror::Error;
@@ -15,6 +15,10 @@ use thiserror::Error;
 pub enum PreciseError {
     #[error("Couldn't open model file")]
     FileError(#[from]std::io::Error),
+    #[error("Couldn't open params file")]
+    ParamsLoadError(std::io::Error),
+    #[error("Params file is has bad structure or is not JSON")]
+    ParamsJsonError(serde_json::Error),
     #[error("Failure while operating model")]
     TensorflowError(#[from]tflite::Error),
     #[error("Model is wrong")]
@@ -90,18 +94,21 @@ impl PreciseParams {
 pub struct ThresholdDecoder {
     min_out: i32,
     out_range: i32,
-    cd: ArrayBase<OwnedRepr<f32>, Dim<[usize; 1]>>,
+    cd: Array1<f32>,
     center: f32
 }
 
 impl ThresholdDecoder {
     fn new(mu_stds: Vec<(f32,f32)>, center: f32, resolution: u32, min_z: i8, max_z: i8 ) -> Self {
+        const ERR_NAN: &str = "Tried to compare a NaN";
+        const ERR_EMPTY: &str = "Mu Stds is empty";
+
         let min_out =  mu_stds.iter().map(|(mu,std)|mu + min_z as f32 * std).min_by(
-            |a,b| a.partial_cmp(b).expect("Tried to compare a NaN")
-        ).unwrap() as i32;
+            |a,b| a.partial_cmp(b).expect(ERR_NAN)
+        ).expect(ERR_EMPTY) as i32;
         let max_out =  mu_stds.iter().map(|(mu,std)|mu + max_z as f32 * std).max_by(
-            |a,b| a.partial_cmp(b).expect("Tried to compare a NaN").reverse()
-        ).unwrap() as i32;
+            |a,b| a.partial_cmp(b).expect(ERR_NAN).reverse()
+        ).expect(ERR_EMPTY) as i32;
 
 
         let mut cd = Self::calc_pd(mu_stds,
@@ -121,33 +128,39 @@ impl ThresholdDecoder {
         }
     }
 
-    fn pdf(x: ArrayBase<OwnedRepr<f32>, Dim<[usize;1]>>, mu: f32, std: f32) -> ArrayBase<OwnedRepr<f32>, Dim<[usize;1]>> {
+    pub fn pdf(x: &Array1<f32>, mu: f32, std: f32) -> Array1<f32> {
         if std == 0.0 {
             x * 0.0
         }
         else {
             let a1 = 1.0 / (std * (2.0 * PI).sqrt());
             
-            let b1 =  (x - mu).mapv(|v|v.powf(2.0));
-            let b2 =  -b1 / (2.0 * std.powf(2.0));
+            let b1 =  -(x - mu).mapv(|v|v.powf(2.0));
+            let b2 =  b1 / (2.0 * std.powf(2.0));
             a1 * (b2.mapv(|v|v.exp()))
         }
     }
 
     fn asigmoid(x: f32) -> f32 {
-        -(1.0 / (x - 1.0).log(E))
+        -(1.0 / (x - 1.0)).log(E)
     }
 
-    fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> ArrayBase<OwnedRepr<f32>, Dim<[usize; 1]>> {
-        let points = Array::linspace(min_out, max_out, resolution as usize * out_range);
+    fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> Array1<f32> {
+        let points = Array1::linspace(min_out, max_out, resolution as usize * out_range);
         let len_mu_stds = mu_stds.len() as f32; // Save this early, we are moving the data later
 
-        let res = Array::zeros(points.dim());
         let pdf = mu_stds.into_iter()
-            .map(|(mu,std)|Self::pdf(points.clone(), mu, std))
-            .fold(res,|res,x| res + x);
+            .map(|(mu,std)|Self::pdf(&points, mu, std)).collect::<Vec<_>>();
+        let res = Array1::zeros(pdf[0].dim());
+        let pdf_views = pdf.iter().map(|v|v.view()).collect::<Vec<_>>();
+        let pdf_2 = stack(Axis(0),&pdf_views).unwrap();
+            //.fold(res,|res,x| res + x);
+        let pdf_old = pdf.iter().fold(res,|res:Array1<f32> ,x| res + x);
 
-        pdf/(resolution * len_mu_stds)
+        let pdf_res = pdf_2.sum_axis(Axis(0));
+        println!("are equal {}, len_2: {}, len_old: {}", pdf_res == pdf_old, pdf_res.len(), pdf_old.len());
+
+        pdf_2.sum_axis(Axis(0))/(resolution * len_mu_stds)
     }
 
     pub fn decode(&self, raw_output: f32) -> f32 {
@@ -191,25 +204,36 @@ impl Precise {
     
         let params = Self::load_params(model_path.as_ref())?;
         let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
-        let mfccs = Array::zeros((params.n_features() as usize, params.n_mfcc as usize));
+        let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize));
         Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
     }
 
     fn load_params(model: &Path) -> Result<PreciseParams, PreciseError> {
-        let file = File::open(model.with_extension("pb.params")).unwrap();
-        Ok(from_reader(BufReader::new(file)).unwrap())
+        let file = File::open(model.with_extension("tflite.params")).map_err(PreciseError::ParamsLoadError)?;
+        from_reader(BufReader::new(file)).map_err(PreciseError::ParamsJsonError)
     }
 
-    fn vectorize_raw(&self, raw: Vec<i16>) -> Vec<f32> {
+    fn vectorize_raw(&self, raw: Vec<i16>) -> Array2<f32> {
+        const CHUNK_MS: u16 = 10;
+        const OUT_MEL_SAMPLES: usize = 20;
+        
+        let samples = ((self.params.sample_rate * CHUNK_MS ) / 1000) as usize;
+        let chunks =raw.chunks(samples);
         let mut trans = Transform::new(
             self.params.sample_rate as usize,
-            raw.len()
-        );
-        let mut out = Vec::new();
-        out.resize(48, 0.0);
+            samples
+        ).nfilters(OUT_MEL_SAMPLES, 40)
+        .normlength(10);
 
-        trans.transform(raw.as_slice(), &mut out);
-        out.into_iter().map(|f|f as f32).collect()
+        let mels = chunks.map::<Vec<_>,_>(|c|{
+            let mut out = vec![0.0; OUT_MEL_SAMPLES];
+            trans.transform(c, &mut out);
+            out.into_iter().map(|f|f as f32).collect()
+        }).flatten().collect::<Vec<f32>>();
+        let num_sets = (mels.len() as f32/(OUT_MEL_SAMPLES) as f32).ceil() as usize;
+
+        Array2::from_shape_vec((num_sets, OUT_MEL_SAMPLES), mels).unwrap()
+        
     }
 
     fn update_vectors(&mut self, stream: &[i16]) -> Array2<f32> {
@@ -218,9 +242,9 @@ impl Precise {
             let mut new_features = self.vectorize_raw(self.window_audio.clone());
             self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec(); // Remove old samples
             if new_features.len() > self.mfccs.dim().0 {
-                new_features = new_features[new_features.len() - self.mfccs.dim().0..].to_vec();
+                new_features = new_features.slice(s![new_features.len() - self.mfccs.dim().0..,..]).to_owned();
             }
-            self.mfccs = self.mfccs.slice(s![new_features.len()..,..]).to_owned();//self.mfccs.unwrap()[new_features.len()..].to_vec().extend(new_features.iter().cloned());
+            self.mfccs = concatenate![Axis(0),self.mfccs.slice(s![new_features.len()..,..]).to_owned(), new_features];
         }
 
         self.mfccs.clone()
@@ -260,13 +284,14 @@ impl Precise {
 
     pub fn clear(&mut self) {
         self.window_audio.clear();
-        self.mfccs = Array::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
+        self.mfccs = Array2::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Precise;
+    use super::{Precise, ThresholdDecoder};
+    use ndarray::{array, aview1};
 
     fn load_samples() -> Vec<i16> {
         let mut reader = hound::WavReader::open("test.wav").unwrap();
@@ -277,5 +302,10 @@ mod tests {
     fn test_positive() {
         let mut precise = Precise::new("hey_mycroft.tflite").unwrap();
         println!("{:?}", precise.update(&load_samples()).unwrap());
+    }
+    #[test]
+    fn test_pdf() {
+        assert_eq!(ThresholdDecoder::pdf(&array![0.0f32], 0.0, 0.0), aview1(&[0.0]));
+        assert_eq!(ThresholdDecoder::pdf(&array![0.0f32, 1.0, 2.0, 3.0, 5.0],2.5,1.4), aview1(&[0.057855975, 0.16051139, 0.2673528, 0.2673528, 0.057855975]));
     }
 }
