@@ -23,3 +23,9 @@ mfcc = {git="https://github.com/syntacticsugarglider/mfcc"}
 
 [dev-dependencies]
 hound = "^3.4"
+criterion = "0.3"
+
+[[bench]]
+name = "precise_benches"
+path = "benches/precise_bench.rs"
+harness = false
