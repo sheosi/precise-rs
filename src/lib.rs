@@ -91,7 +91,7 @@ impl PreciseParams {
 }
 
 #[derive(Debug, Clone)]
-pub struct ThresholdDecoder {
+pub(crate) struct ThresholdDecoder {
     min_out: i32,
     out_range: i32,
     cd: Array1<f32>,
@@ -128,7 +128,7 @@ impl ThresholdDecoder {
         }
     }
 
-    pub fn pdf(x: &Array1<f32>, mu: f32, std: f32) -> Array1<f32> {
+    pub(crate) fn pdf(x: &Array1<f32>, mu: f32, std: f32) -> Array1<f32> {
         if std == 0.0 {
             x * 0.0
         }
@@ -163,7 +163,7 @@ impl ThresholdDecoder {
         pdf_2.sum_axis(Axis(0))/(resolution * len_mu_stds)
     }
 
-    pub fn decode(&self, raw_output: f32) -> f32 {
+    pub(crate) fn decode(&self, raw_output: f32) -> f32 {
         if raw_output == 1.0 || raw_output == 0.0 {
             raw_output
         }
@@ -214,10 +214,10 @@ impl Precise {
     }
 
     fn vectorize_raw(&self, raw: Vec<i16>) -> Array2<f32> {
-        const CHUNK_MS: u16 = 10;
+        const CHUNK_MS: u32 = 10;
         const OUT_MEL_SAMPLES: usize = 20;
         
-        let samples = ((self.params.sample_rate * CHUNK_MS ) / 1000) as usize;
+        let samples = ((self.params.sample_rate as u32 * CHUNK_MS ) / 1000) as usize;
         let chunks =raw.chunks(samples);
         let mut trans = Transform::new(
             self.params.sample_rate as usize,
@@ -226,8 +226,15 @@ impl Precise {
         .normlength(10);
 
         let mels = chunks.map::<Vec<_>,_>(|c|{
-            let mut out = vec![0.0; OUT_MEL_SAMPLES];
-            trans.transform(c, &mut out);
+            let mut out = vec![0.0; OUT_MEL_SAMPLES * 3];
+            if c.len() == samples {
+                trans.transform(c, &mut out);
+            }
+            else { // Needed for the last one
+                let mut s = c.to_vec();
+                s.resize(samples, 0);
+                trans.transform(&s, &mut out);
+            }
             out.into_iter().map(|f|f as f32).collect()
         }).flatten().collect::<Vec<f32>>();
         let num_sets = (mels.len() as f32/(OUT_MEL_SAMPLES) as f32).ceil() as usize;
@@ -244,7 +251,8 @@ impl Precise {
             if new_features.len() > self.mfccs.dim().0 {
                 new_features = new_features.slice(s![new_features.len() - self.mfccs.dim().0..,..]).to_owned();
             }
-            self.mfccs = concatenate![Axis(0),self.mfccs.slice(s![new_features.len()..,..]).to_owned(), new_features];
+
+            self.mfccs = concatenate![Axis(0), self.mfccs.slice(s![new_features.len()..,..]).to_owned(), new_features];
         }
 
         self.mfccs.clone()
