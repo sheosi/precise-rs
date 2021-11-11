@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::f32::consts::{E, PI};
 use std::fs::File;
 use std::io::BufReader;
@@ -105,7 +106,7 @@ impl Precise {
 
         let model = PreciseModel::new(model_path)?;
         let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
-        let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize));
+        let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize * 3));
         Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
     }
 
@@ -114,20 +115,23 @@ impl Precise {
         from_reader(BufReader::new(file)).map_err(PreciseError::ParamsJsonError)
     }
 
-    fn vectorize_raw(&self, raw: Vec<i16>) -> Array2<f32> {
-        const CHUNK_MS: u32 = 10;
-        const OUT_MEL_SAMPLES: usize = 20;
-        
-        let samples = ((self.params.sample_rate as u32 * CHUNK_MS ) / 1000) as usize;
-        let chunks =raw.chunks(samples);
+    pub(crate) fn chop_chunks(samples: &[i16], window_size: usize, hop_size: usize) -> impl Iterator<Item = &[i16]> {
+        (window_size..samples.len()+1).step_by(hop_size).map(move |i| &samples[i - window_size..i])
+    }
+
+    fn vectorize_raw(&self, raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
+        let out_mel_samples = params.n_mfcc.into();
+        let samples= params.window_samples().try_into().unwrap();
+        let hop_s = params.hop_samples() as usize;
+        let chunks =Self::chop_chunks( &raw, samples, hop_s);
         let mut trans = Transform::new(
-            self.params.sample_rate as usize,
+            self.params.sample_rate.into(),
             samples
-        ).nfilters(OUT_MEL_SAMPLES, 40)
-        .normlength(10);
+        ).nfilters(out_mel_samples, params.n_filt.into())
+        .normlength(params.n_fft.into());
 
         let mels = chunks.map::<Vec<_>,_>(|c|{
-            let mut out = vec![0.0; OUT_MEL_SAMPLES * 3];
+            let mut out = vec![0.0; out_mel_samples * 3];
             if c.len() == samples {
                 trans.transform(c, &mut out);
             }
@@ -138,22 +142,24 @@ impl Precise {
             }
             out.into_iter().map(|f|f as f32).collect()
         }).flatten().collect::<Vec<f32>>();
-        let num_sets = (mels.len() as f32/(OUT_MEL_SAMPLES) as f32).ceil() as usize;
+        let num_sets = (mels.len() as f32/(out_mel_samples * 3) as f32).ceil() as usize;
 
-        Array2::from_shape_vec((num_sets, OUT_MEL_SAMPLES), mels).unwrap()
+        Array2::from_shape_vec((num_sets, out_mel_samples * 3), mels).unwrap()
         
     }
 
     fn update_vectors(&mut self, stream: &[i16]) -> Array2<f32> {
         self.window_audio.extend(stream.iter().cloned());
         if self.window_audio.len() >= self.params.window_samples() as usize {
-            let mut new_features = self.vectorize_raw(self.window_audio.clone());
-            self.window_audio = self.window_audio[new_features.len() * self.params.hop_samples() as usize..].to_vec(); // Remove old samples
-            if new_features.len() > self.mfccs.dim().0 {
-                new_features = new_features.slice(s![new_features.len() - self.mfccs.dim().0..,..]).to_owned();
+            let mut new_features = self.vectorize_raw(self.window_audio.clone(), &self.params);
+            //let hop_s = self.params.hop_samples();
+            //self.window_audio = self.window_audio[new_features.nrows() * hop_s as usize..].to_vec(); // Remove old samples
+            self.window_audio = self.window_audio[new_features.nrows()..].to_vec(); // Remove old samples
+            if new_features.len() > self.mfccs.nrows() {
+                new_features = new_features.slice(s![new_features.nrows() - self.mfccs.dim().0..,..]).to_owned();
             }
 
-            self.mfccs = concatenate![Axis(0), self.mfccs.slice(s![new_features.len()..,..]).to_owned(), new_features];
+            self.mfccs = concatenate![Axis(0), self.mfccs.slice(s![new_features.nrows()..,..]).to_owned(), new_features];
         }
 
         self.mfccs.clone()
@@ -161,7 +167,7 @@ impl Precise {
 
 
     pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
-        // Do this first so that we are not borrowed mutable twice
+        // Do this first so that we are not borrowed mutably twice
         let mfccs = self.update_vectors(audio);
         let out = self.decoder.decode(self.model.predict(&mfccs)?);
         Ok(out)
@@ -169,7 +175,7 @@ impl Precise {
 
     pub fn clear(&mut self) {
         self.window_audio.clear();
-        self.mfccs = Array2::zeros((self.params.n_features() as usize, self.params.n_mfcc as usize));
+        self.mfccs = Array2::zeros((self.params.n_features() as usize, (self.params.n_mfcc as usize)*3));
     }
 }
 
@@ -297,7 +303,7 @@ impl PreciseModel {
         let outputs = interpreter.outputs().to_vec();
         let output_index = outputs[0];
 
-        interpreter.tensor_data_mut(input_index)?[0..mfccs.len()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
+        interpreter.tensor_data_mut(input_index)?[0..mfccs.nrows()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
 
         interpreter.invoke()?;
 
@@ -317,13 +323,23 @@ mod tests {
         samples
     }
     #[test]
-    fn test_positive() {
-        let mut precise = Precise::new("hey_mycroft.tflite").unwrap();
-        println!("{:?}", precise.update(&load_samples()).unwrap());
-    }
-    #[test]
     fn test_pdf() {
         assert_eq!(ThresholdDecoder::pdf(&array![0.0f32], 0.0, 0.0), aview1(&[0.0]));
         assert_eq!(ThresholdDecoder::pdf(&array![0.0f32, 1.0, 2.0, 3.0, 5.0],2.5,1.4), aview1(&[0.057855975, 0.16051139, 0.2673528, 0.2673528, 0.057855975]));
+    }
+    #[test]
+    fn chop_chunks() {
+        assert_eq!(
+            Precise::chop_chunks(&[1,2,3,4,5,6,7,8,9], 3, 2).collect::<Vec<_>>(),
+            &[&[1,2,3], &[3,4,5], &[5,6,7], &[7,8,9]]
+        );
+
+        let s = vec![0;195804];
+        assert_eq!(Precise::chop_chunks(&s, 1600, 800).count(), 243);
+    }
+    #[test]
+    fn test_positive() {
+        let mut precise = Precise::new("hey_mycroft.tflite").unwrap();
+        println!("{:?}", precise.update(&load_samples()).unwrap());
     }
 }
