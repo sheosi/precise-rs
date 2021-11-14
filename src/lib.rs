@@ -106,7 +106,7 @@ impl Precise {
 
         let model = PreciseModel::new(model_path)?;
         let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
-        let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize * 3));
+        let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize));
         Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
     }
 
@@ -140,11 +140,11 @@ impl Precise {
                 s.resize(samples, 0);
                 trans.transform(&s, &mut out);
             }
-            out.into_iter().map(|f|f as f32).collect()
+            out[..out_mel_samples].iter().map(|f|*f as f32).collect()
         }).flatten().collect::<Vec<f32>>();
-        let num_sets = (mels.len() as f32/(out_mel_samples * 3) as f32).ceil() as usize;
+        let num_sets = (mels.len() as f32/(out_mel_samples) as f32).ceil() as usize;
 
-        Array2::from_shape_vec((num_sets, out_mel_samples * 3), mels).unwrap()
+        Array2::from_shape_vec((num_sets, out_mel_samples), mels).unwrap()
         
     }
 
@@ -239,16 +239,17 @@ impl ThresholdDecoder {
         let points = Array1::linspace(min_out, max_out, resolution as usize * out_range);
         let len_mu_stds = mu_stds.len() as f32; // Save this early, we are moving the data later
 
+        // PDF and PDF_2 are the same look into what's better
         let pdf = mu_stds.into_iter()
             .map(|(mu,std)|Self::pdf(&points, mu, std)).collect::<Vec<_>>();
         let res = Array1::zeros(pdf[0].dim());
         let pdf_views = pdf.iter().map(|v|v.view()).collect::<Vec<_>>();
         let pdf_2 = stack(Axis(0),&pdf_views).unwrap();
             //.fold(res,|res,x| res + x);
-        let pdf_old = pdf.iter().fold(res,|res:Array1<f32> ,x| res + x);
+        let _pdf_old = pdf.iter().fold(res,|res:Array1<f32> ,x| res + x);
 
-        let pdf_res = pdf_2.sum_axis(Axis(0));
-        println!("are equal {}, len_2: {}, len_old: {}", pdf_res == pdf_old, pdf_res.len(), pdf_old.len());
+        let _pdf_res = pdf_2.sum_axis(Axis(0));
+        
 
         pdf_2.sum_axis(Axis(0))/(resolution * len_mu_stds)
     }
@@ -303,7 +304,9 @@ impl PreciseModel {
         let outputs = interpreter.outputs().to_vec();
         let output_index = outputs[0];
 
-        interpreter.tensor_data_mut(input_index)?[0..mfccs.nrows()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
+        let a = interpreter.tensor_data_mut::<f32>(input_index)?.len();
+
+        interpreter.tensor_data_mut(input_index)?[0..mfccs.len()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
 
         interpreter.invoke()?;
 
