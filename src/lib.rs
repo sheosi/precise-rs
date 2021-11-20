@@ -359,8 +359,10 @@ mod tests {
     }
     #[test]
     fn decode() {
-        // TODO!!: Not yet implemented
-        assert!(false)
+        let thres = ThresholdDecoder::new(vec![(6.0,4.0)], 0.2, 200, -4, 4 );
+        
+        println!("{}", thres.decode(0.3));
+        assert!( (thres.decode(0.3) - 0.108636074).abs() <= f32::EPSILON);
     }
     #[test]
     fn mfcc() {
