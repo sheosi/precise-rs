@@ -119,13 +119,13 @@ impl Precise {
         (window_size..samples.len()+1).step_by(hop_size).map(move |i| &samples[i - window_size..i])
     }
 
-    fn vectorize_raw(&self, raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
+    pub(crate) fn mfcc_spec(raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
         let out_mel_samples = params.n_mfcc.into();
         let samples= params.window_samples().try_into().unwrap();
         let hop_s = params.hop_samples() as usize;
         let chunks =Self::chop_chunks( &raw, samples, hop_s);
         let mut trans = Transform::new(
-            self.params.sample_rate.into(),
+            params.sample_rate.into(),
             samples
         ).nfilters(out_mel_samples, params.n_filt.into())
         .normlength(params.n_fft.into());
@@ -145,13 +145,27 @@ impl Precise {
         let num_sets = (mels.len() as f32/(out_mel_samples) as f32).ceil() as usize;
 
         Array2::from_shape_vec((num_sets, out_mel_samples), mels).unwrap()
-        
     }
+
+    fn vectorize_raw(raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
+        Self::mfcc_spec(raw, params)
+    }
+
+    ///Inserts extra features that are the difference between adjacent timesteps
+    fn add_deltas(features: &Array2<f32>) -> Array2<f32> {
+        /*let mut deltas = Array2::zeros(features.raw_dim());
+        for i in 1..features.nrows() {
+            deltas[i] = features[i] - features[i - 1];
+        }
+        return np.concatenate([features, deltas], -1)*/
+        Array2::zeros(features.raw_dim())
+    }
+
 
     fn update_vectors(&mut self, stream: &[i16]) -> Array2<f32> {
         self.window_audio.extend(stream.iter().cloned());
         if self.window_audio.len() >= self.params.window_samples() as usize {
-            let mut new_features = self.vectorize_raw(self.window_audio.clone(), &self.params);
+            let mut new_features = Self::vectorize_raw(self.window_audio.clone(), &self.params);
             //let hop_s = self.params.hop_samples();
             //self.window_audio = self.window_audio[new_features.nrows() * hop_s as usize..].to_vec(); // Remove old samples
             self.window_audio = self.window_audio[new_features.nrows()..].to_vec(); // Remove old samples
@@ -167,8 +181,11 @@ impl Precise {
 
 
     pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
-        // Do this first so that we are not borrowed mutably twice
-        let mfccs = self.update_vectors(audio);
+        let mut mfccs = self.update_vectors(audio);
+        if self.params.use_delta {
+            // UNTESTED!
+            mfccs = Self::add_deltas(&mfccs);
+        }
         let out = self.decoder.decode(self.model.predict(&mfccs)?);
         Ok(out)
     }
@@ -303,9 +320,7 @@ impl PreciseModel {
 
         let outputs = interpreter.outputs().to_vec();
         let output_index = outputs[0];
-
-        let a = interpreter.tensor_data_mut::<f32>(input_index)?.len();
-
+    
         interpreter.tensor_data_mut(input_index)?[0..mfccs.len()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
 
         interpreter.invoke()?;
@@ -317,8 +332,10 @@ impl PreciseModel {
 
 #[cfg(test)]
 mod tests {
+    use crate::PreciseParams;
+
     use super::{Precise, ThresholdDecoder};
-    use ndarray::{array, aview1};
+    use ndarray::{array, aview1, aview2, s};
 
     fn load_samples() -> Vec<i16> {
         let mut reader = hound::WavReader::open("test.wav").unwrap();
@@ -339,6 +356,60 @@ mod tests {
 
         let s = vec![0;195804];
         assert_eq!(Precise::chop_chunks(&s, 1600, 800).count(), 243);
+    }
+    #[test]
+    fn decode() {
+        // TODO!!: Not yet implemented
+        assert!(false)
+    }
+    #[test]
+    fn mfcc() {
+        let params = PreciseParams {
+            window_t: 0.100000001,
+            hop_t: 0.0500000007,
+            sample_rate: 16000,
+            n_fft: 512,
+            n_mfcc: 13,
+            n_filt: 20,
+
+            // Not needed here
+            buffer_t: 0.0, 
+            sample_depth: 0, 
+            use_delta: false,
+            threshold_center: 0.0,
+            threshold_config: vec![]
+        };
+
+        let mfcc = Precise::mfcc_spec(vec![0;195804], &params);
+
+        assert_eq!(mfcc.nrows(), 243);
+        assert_eq!(mfcc.ncols(), 13);
+        assert_eq!(mfcc.slice(s![120..125,..]), aview2(&[
+            [-3.60436534e+01,  0.00          ,  0.00000000e+00,
+              0.0           ,  1.36787991e-15,  0.0           ,
+              0.0           ,  0.0           , -1.16358815e-15,
+              0.0           ,  0.0           ,  0.0           ,
+             -8.45396278e-16],
+            [-3.60436534e+01,  0.0           ,  0.0           ,
+              0.0           ,  1.36787991e-15,  0.0           ,
+              0.0           ,  0.0           , -1.16358815e-15,
+              0.0           ,  0.0           ,  0.0           ,
+             -8.45396278e-16],
+            [-3.60436534e+01,  0.0           ,  0.0           ,
+              0.0           ,  1.36787991e-15,  0.0           ,
+              0.0           ,  0.0           , -1.16358815e-15,
+              0.0           ,  0.0           ,  0.0           ,
+             -8.45396278e-16],
+            [-3.60436534e+01,  0.0           ,  0.0           ,
+              0.0           ,  1.36787991e-15,  0.0           ,
+              0.0           ,  0.0           , -1.16358815e-15,
+              0.0           ,  0.0           ,  0.0           ,
+            -8.45396278e-16],
+            [-3.60436534e+01,  0.0           ,  0.0           ,
+              0.0           ,  1.36787991e-15,  0.0           ,
+              0.0           ,  0.0           , -1.16358815e-15,
+              0.0           ,  0.0           ,  0.0           ,
+            -8.45396278e-16]]))
     }
     #[test]
     fn test_positive() {
