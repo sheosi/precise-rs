@@ -24,6 +24,7 @@ mfcc = {git="https://github.com/sheosi/mfcc"}
 [dev-dependencies]
 hound = "^3.4"
 criterion = "0.3"
+assert_approx_eq = "^1.0"
 
 [[bench]]
 name = "precise_benches"
