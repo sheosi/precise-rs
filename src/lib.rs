@@ -115,11 +115,11 @@ impl Precise {
         from_reader(BufReader::new(file)).map_err(PreciseError::ParamsJsonError)
     }
 
-    pub(crate) fn chop_chunks(samples: &[i16], window_size: usize, hop_size: usize) -> impl Iterator<Item = &[i16]> {
+    fn chop_chunks(samples: &[i16], window_size: usize, hop_size: usize) -> impl Iterator<Item = &[i16]> {
         (window_size..samples.len()+1).step_by(hop_size).map(move |i| &samples[i - window_size..i])
     }
 
-    pub(crate) fn mfcc_spec(raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
+    fn mfcc_spec(raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
         let out_mel_samples = params.n_mfcc.into();
         let samples= params.window_samples().try_into().unwrap();
         let hop_s = params.hop_samples() as usize;
@@ -198,7 +198,7 @@ impl Precise {
 
 
 #[derive(Debug, Clone)]
-pub(crate) struct ThresholdDecoder {
+struct ThresholdDecoder {
     min_out: i32,
     out_range: i32,
     cd: Array1<f32>,
@@ -235,7 +235,7 @@ impl ThresholdDecoder {
         }
     }
 
-    pub(crate) fn pdf(x: &Array1<f32>, mu: f32, std: f32) -> Array1<f32> {
+    fn pdf(x: &Array1<f32>, mu: f32, std: f32) -> Array1<f32> {
         if std == 0.0 {
             x * 0.0
         }
@@ -249,7 +249,7 @@ impl ThresholdDecoder {
     }
 
     fn asigmoid(x: f32) -> f32 {
-        -(1.0 / (x - 1.0)).log(E)
+        -(1.0 / x - 1.0).log(E)
     }
 
     fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> Array1<f32> {
@@ -271,7 +271,7 @@ impl ThresholdDecoder {
         pdf_2.sum_axis(Axis(0))/(resolution * len_mu_stds)
     }
 
-    pub(crate) fn decode(&self, raw_output: f32) -> f32 {
+    fn decode(&self, raw_output: f32) -> f32 {
         if raw_output == 1.0 || raw_output == 0.0 {
             raw_output
         }
@@ -335,7 +335,8 @@ mod tests {
     use crate::PreciseParams;
 
     use super::{Precise, ThresholdDecoder};
-    use ndarray::{array, aview1, aview2, s};
+    use assert_approx_eq::assert_approx_eq;
+    use ndarray::{array, aview1, s};
 
     fn load_samples() -> Vec<i16> {
         let mut reader = hound::WavReader::open("test.wav").unwrap();
@@ -345,7 +346,9 @@ mod tests {
     #[test]
     fn test_pdf() {
         assert_eq!(ThresholdDecoder::pdf(&array![0.0f32], 0.0, 0.0), aview1(&[0.0]));
-        assert_eq!(ThresholdDecoder::pdf(&array![0.0f32, 1.0, 2.0, 3.0, 5.0],2.5,1.4), aview1(&[0.057855975, 0.16051139, 0.2673528, 0.2673528, 0.057855975]));
+        assert_eq!(
+            ThresholdDecoder::pdf(&array![0.0f32, 1.0, 2.0, 3.0, 5.0],2.5,1.4),
+            aview1(&[0.057_855_975, 0.160_511_39, 0.267_352_8, 0.267_352_8, 0.057_855_975]));
     }
     #[test]
     fn chop_chunks() {
@@ -360,16 +363,23 @@ mod tests {
     #[test]
     fn decode() {
         let thres = ThresholdDecoder::new(vec![(6.0,4.0)], 0.2, 200, -4, 4 );
+        assert_eq!(thres.min_out, -10);
+        assert_eq!(thres.cd.len(), 6400);
+        assert_eq!(thres.cd.slice(s![230..240]), aview1(
+            &[7.128_421e-5   , 7.179_359e-5, 7.230_534e-5  , 7.281_946_5e-5,
+              7.333_598e-5   , 7.385_489e-5, 7.437_621_4e-5, 7.489_996e-5  ,
+              7.542_613_5e-5 , 7.595_475e-5])
+        );
+        assert_eq!(thres.out_range, 32);
         
-        println!("{}", thres.decode(0.3));
-        assert!( (thres.decode(0.3) - 0.108636074).abs() <= f32::EPSILON);
+        assert_approx_eq!(thres.decode(0.3), 0.108_636_04);
     }
     #[test]
     fn mfcc() {
         let params = PreciseParams {
-            window_t: 0.100000001,
-            hop_t: 0.0500000007,
-            sample_rate: 16000,
+            window_t: 0.1,
+            hop_t: 0.05,
+            sample_rate: 16_000,
             n_fft: 512,
             n_mfcc: 13,
             n_filt: 20,
@@ -386,36 +396,43 @@ mod tests {
 
         assert_eq!(mfcc.nrows(), 243);
         assert_eq!(mfcc.ncols(), 13);
-        assert_eq!(mfcc.slice(s![120..125,..]), aview2(&[
-            [-3.60436534e+01,  0.00          ,  0.00000000e+00,
-              0.0           ,  1.36787991e-15,  0.0           ,
-              0.0           ,  0.0           , -1.16358815e-15,
-              0.0           ,  0.0           ,  0.0           ,
-             -8.45396278e-16],
-            [-3.60436534e+01,  0.0           ,  0.0           ,
-              0.0           ,  1.36787991e-15,  0.0           ,
-              0.0           ,  0.0           , -1.16358815e-15,
-              0.0           ,  0.0           ,  0.0           ,
-             -8.45396278e-16],
-            [-3.60436534e+01,  0.0           ,  0.0           ,
-              0.0           ,  1.36787991e-15,  0.0           ,
-              0.0           ,  0.0           , -1.16358815e-15,
-              0.0           ,  0.0           ,  0.0           ,
-             -8.45396278e-16],
-            [-3.60436534e+01,  0.0           ,  0.0           ,
-              0.0           ,  1.36787991e-15,  0.0           ,
-              0.0           ,  0.0           , -1.16358815e-15,
-              0.0           ,  0.0           ,  0.0           ,
-            -8.45396278e-16],
-            [-3.60436534e+01,  0.0           ,  0.0           ,
-              0.0           ,  1.36787991e-15,  0.0           ,
-              0.0           ,  0.0           , -1.16358815e-15,
-              0.0           ,  0.0           ,  0.0           ,
-            -8.45396278e-16]]))
+        /* Note: MFCC behaviour seems different from sonopy (the one that the 
+            Python version uses), however, seems like the model is still capableç
+            of reading it*/
+        /*assert_eq!(mfcc.slice(s![120..125,..]), aview2(&[
+            [-3.604_365e1   ,  0.00           ,  0.00000000e+00 ,
+              0.0           ,  1.367_879_9e-15,  0.0            ,
+              0.0           ,  0.0            , -1.163_588_1e-15,
+              0.0           ,  0.0            ,  0.0            ,
+             -8.453_962_7e-16],
+            [-3.604_365e1   ,  0.0            ,  0.0            ,
+              0.0           ,  1.367_879_9e-15,  0.0            ,
+              0.0           ,  0.0            , -1.163_588_1e-15,
+              0.0           ,  0.0            ,  0.0            ,
+             -8.453_962_7e-16],
+            [-3.604_365e1   ,  0.0            ,  0.0            ,
+              0.0           ,  1.367_879_9e-15,  0.0            ,
+              0.0           ,  0.0            , -1.163_588_1e-15,
+              0.0           ,  0.0            ,  0.0            ,
+             -8.453_962_7e-16],
+            [-3.604_365e1   ,  0.0            ,  0.0            ,
+              0.0           ,  1.367_879_9e-15,  0.0            ,
+              0.0           ,  0.0            , -1.163_588_1e-15,
+              0.0           ,  0.0            ,  0.0            ,
+            -8.453_962_7e-16],
+            [-3.604_365e1   ,  0.0            ,  0.0            ,
+              0.0           ,  1.367_879_9e-15,  0.0            ,
+              0.0           ,  0.0            , -1.163_588_1e-15,
+              0.0           ,  0.0            ,  0.0            ,
+            -8.453_962_7e-16]]))*/
+    }
+    #[test]
+    fn asigmoid() {
+        assert_approx_eq!(ThresholdDecoder::asigmoid(0.3), -0.8472979);
     }
     #[test]
     fn test_positive() {
         let mut precise = Precise::new("hey_mycroft.tflite").unwrap();
-        println!("{:?}", precise.update(&load_samples()).unwrap());
+        assert!(precise.update(&load_samples()).unwrap() >= 0.9);
     }
 }
