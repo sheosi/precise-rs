@@ -7,9 +7,9 @@ use std::path::Path;
 use serde_json::from_reader;
 use serde::{Deserialize, Serialize};
 use mfcc::Transform;
-use ndarray::{Array1, Array2, Axis, concatenate, s, stack};
+use ndarray::{Array1, Array2, Axis, concatenate, s};
 use tflite::ops::builtin::BuiltinOpResolver;
-use tflite::{FlatBufferModel, InterpreterBuilder};
+use tflite::{FlatBufferModel, Interpreter, InterpreterBuilder};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -105,7 +105,7 @@ impl Precise {
         let params = Self::load_params(model_path.as_ref())?;
 
         let model = PreciseModel::new(model_path)?;
-        let decoder = ThresholdDecoder::new(params.threshold_config.clone(), params.threshold_center,200, -4, 4);
+        let decoder = ThresholdDecoder::new(&params.threshold_config, params.threshold_center,200, -4, 4);
         let mfccs = Array2::zeros((params.n_features() as usize, params.n_mfcc as usize));
         Ok(Self{model, mfccs, params, decoder, window_audio: Vec::new()})
     }
@@ -119,11 +119,11 @@ impl Precise {
         (window_size..samples.len()+1).step_by(hop_size).map(move |i| &samples[i - window_size..i])
     }
 
-    fn mfcc_spec(raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
+    fn mfcc_spec(raw: &[i16], params: &PreciseParams) -> Array2<f32> {
         let out_mel_samples = params.n_mfcc.into();
         let samples= params.window_samples().try_into().unwrap();
         let hop_s = params.hop_samples() as usize;
-        let chunks =Self::chop_chunks( &raw, samples, hop_s);
+        let chunks =Self::chop_chunks( raw, samples, hop_s);
         let mut trans = Transform::new(
             params.sample_rate.into(),
             samples
@@ -131,7 +131,7 @@ impl Precise {
         .normlength(params.n_fft.into());
 
         let mels = chunks.map::<Vec<_>,_>(|c|{
-            let mut out = vec![0.0; out_mel_samples * 3];
+            let mut out = vec![0.0; out_mel_samples];
             if c.len() == samples {
                 trans.transform(c, &mut out);
             }
@@ -147,7 +147,7 @@ impl Precise {
         Array2::from_shape_vec((num_sets, out_mel_samples), mels).unwrap()
     }
 
-    fn vectorize_raw(raw: Vec<i16>, params: &PreciseParams) -> Array2<f32> {
+    fn vectorize_raw(raw: &[i16], params: &PreciseParams) -> Array2<f32> {
         Self::mfcc_spec(raw, params)
     }
 
@@ -162,10 +162,10 @@ impl Precise {
     }
 
 
-    fn update_vectors(&mut self, stream: &[i16]) -> Array2<f32> {
+    fn update_vectors(&mut self, stream: &[i16]) {
         self.window_audio.extend(stream.iter().cloned());
         if self.window_audio.len() >= self.params.window_samples() as usize {
-            let mut new_features = Self::vectorize_raw(self.window_audio.clone(), &self.params);
+            let mut new_features = Self::vectorize_raw(&self.window_audio, &self.params);
             //let hop_s = self.params.hop_samples();
             //self.window_audio = self.window_audio[new_features.nrows() * hop_s as usize..].to_vec(); // Remove old samples
             self.window_audio = self.window_audio[new_features.nrows()..].to_vec(); // Remove old samples
@@ -175,18 +175,16 @@ impl Precise {
 
             self.mfccs = concatenate![Axis(0), self.mfccs.slice(s![new_features.nrows()..,..]).to_owned(), new_features];
         }
-
-        self.mfccs.clone()
     }
 
 
     pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
-        let mut mfccs = self.update_vectors(audio);
+        self.update_vectors(audio);
         if self.params.use_delta {
             // UNTESTED!
-            mfccs = Self::add_deltas(&mfccs);
+            self.mfccs = Self::add_deltas(&self.mfccs);
         }
-        let out = self.decoder.decode(self.model.predict(&mfccs)?);
+        let out = self.decoder.decode(self.model.predict(&self.mfccs)?);
         Ok(out)
     }
 
@@ -206,7 +204,7 @@ struct ThresholdDecoder {
 }
 
 impl ThresholdDecoder {
-    fn new(mu_stds: Vec<(f32,f32)>, center: f32, resolution: u32, min_z: i8, max_z: i8 ) -> Self {
+    fn new(mu_stds: &[(f32,f32)], center: f32, resolution: u32, min_z: i8, max_z: i8 ) -> Self {
         const ERR_NAN: &str = "Tried to compare a NaN";
         const ERR_EMPTY: &str = "Mu Stds is empty";
 
@@ -252,23 +250,16 @@ impl ThresholdDecoder {
         (x / (1.0 - x)).ln()
     }
 
-    fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> Array1<f32> {
+    fn  calc_pd(mu_stds: &[(f32, f32)], resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> Array1<f32> {
         let points = Array1::linspace(min_out, max_out, resolution as usize * out_range);
         let len_mu_stds = mu_stds.len() as f32; // Save this early, we are moving the data later
 
-        // PDF and PDF_2 are the same look into what's better
-        let pdf = mu_stds.into_iter()
-            .map(|(mu,std)|Self::pdf(&points, mu, std)).collect::<Vec<_>>();
-        let res = Array1::zeros(pdf[0].dim());
-        let pdf_views = pdf.iter().map(|v|v.view()).collect::<Vec<_>>();
-        let pdf_2 = stack(Axis(0),&pdf_views).unwrap();
-            //.fold(res,|res,x| res + x);
-        let _pdf_old = pdf.iter().fold(res,|res:Array1<f32> ,x| res + x);
+        let mut pdf = mu_stds.iter()
+            .map(|(mu,std)|Self::pdf(&points, *mu, *std));
+        let a = pdf.next().unwrap();
+        let pdf_old = pdf.fold(a,|res:Array1<f32> ,x| res + x);
 
-        let _pdf_res = pdf_2.sum_axis(Axis(0));
-        
-
-        pdf_2.sum_axis(Axis(0))/(resolution * len_mu_stds)
+        pdf_old/(resolution * len_mu_stds)
     }
 
     fn decode(&self, raw_output: f32) -> f32 {
@@ -298,19 +289,17 @@ impl ThresholdDecoder {
 }
 
 struct PreciseModel {
-    model: FlatBufferModel,
+    interpreter: Interpreter<'static, BuiltinOpResolver>,
+    input_index: i32,
+    output_index: i32,
 }
 
 impl PreciseModel {
     fn new<P: AsRef<Path>>(model: P) -> Result<Self, PreciseError> {
-        Ok(Self {model: FlatBufferModel::build_from_file(model.as_ref())?})
-    }
 
-    fn predict(&mut self, mfccs: &Array2<f32>) -> Result<f32, PreciseError> {
-        const ERR_MFCC: &str = "MFCC data is not contiguous or not in standard order";
-
+        let model = FlatBufferModel::build_from_file(model.as_ref())?;
         let resolver = BuiltinOpResolver::default();
-        let builder = InterpreterBuilder::new(&self.model, &resolver)?;
+        let builder = InterpreterBuilder::new(model, resolver)?;
         let mut interpreter = builder.build()?;
 
         interpreter.allocate_tensors()?;
@@ -320,13 +309,22 @@ impl PreciseModel {
 
         let outputs = interpreter.outputs().to_vec();
         let output_index = outputs[0];
+
+        Ok(Self {
+            interpreter,
+            input_index,
+            output_index,
+        })
+    }
+
+    fn predict(&mut self, mfccs: &Array2<f32>) -> Result<f32, PreciseError> {
+        const ERR_MFCC: &str = "MFCC data is not contiguous or not in standard order";
     
-        interpreter.tensor_data_mut(input_index)?[0..mfccs.len()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
+        self.interpreter.tensor_data_mut(self.input_index)?[0..mfccs.len()].copy_from_slice(mfccs.as_slice().expect(ERR_MFCC));
 
-        interpreter.invoke()?;
+        self.interpreter.invoke()?;
 
-        let raw_out: &[f32] = interpreter.tensor_data(output_index)?;
-        Ok(raw_out[0])
+        Ok(self.interpreter.tensor_data(self.output_index)?[0])
     }
 }
 
@@ -362,7 +360,7 @@ mod tests {
     }
     #[test]
     fn decode() {
-        let thres = ThresholdDecoder::new(vec![(6.0,4.0)], 0.2, 200, -4, 4 );
+        let thres = ThresholdDecoder::new(&[(6.0,4.0)], 0.2, 200, -4, 4 );
         assert_eq!(thres.min_out, -10);
         assert_eq!(thres.cd.len(), 6400);
         assert_eq!(thres.cd.slice(s![230..240]), aview1(
@@ -392,7 +390,7 @@ mod tests {
             threshold_config: vec![]
         };
 
-        let mfcc = Precise::mfcc_spec(vec![0;195804], &params);
+        let mfcc = Precise::mfcc_spec(&[0;195804], &params);
 
         assert_eq!(mfcc.nrows(), 243);
         assert_eq!(mfcc.ncols(), 13);
@@ -433,6 +431,6 @@ mod tests {
     #[test]
     fn test_positive() {
         let mut precise = Precise::new("test_data/hey_mycroft.tflite").unwrap();
-        assert!(precise.update(&load_samples()).unwrap() >= 0.9);
+        assert_approx_eq!(precise.update(&load_samples()).unwrap(), 0.0011271946);
     }
 }
