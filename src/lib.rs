@@ -1,5 +1,5 @@
 use std::convert::TryInto;
-use std::f32::consts::{E, PI};
+use std::f32::consts::PI;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -249,7 +249,7 @@ impl ThresholdDecoder {
     }
 
     fn asigmoid(x: f32) -> f32 {
-        -(1.0 / x - 1.0).log(E)
+        (x / (1.0 - x)).ln()
     }
 
     fn  calc_pd(mu_stds: Vec<(f32, f32)>, resolution: f32, min_out: f32, max_out: f32, out_range: usize) -> Array1<f32> {
@@ -339,7 +339,7 @@ mod tests {
     use ndarray::{array, aview1, s};
 
     fn load_samples() -> Vec<i16> {
-        let mut reader = hound::WavReader::open("test.wav").unwrap();
+        let mut reader = hound::WavReader::open("test_data/test.wav").unwrap();
         let samples: Vec<i16> = reader.samples().map(|e|e.unwrap()).collect();
         samples
     }
@@ -432,7 +432,7 @@ mod tests {
     }
     #[test]
     fn test_positive() {
-        let mut precise = Precise::new("hey_mycroft.tflite").unwrap();
+        let mut precise = Precise::new("test_data/hey_mycroft.tflite").unwrap();
         assert!(precise.update(&load_samples()).unwrap() >= 0.9);
     }
 }

@@ -28,5 +28,5 @@ assert_approx_eq = "^1.0"
 
 [[bench]]
 name = "precise_benches"
-path = "benches/precise_bench.rs"
+path = "src/benches/precise_bench.rs"
 harness = false
