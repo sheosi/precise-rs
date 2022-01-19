@@ -12,44 +12,77 @@ use tflite::ops::builtin::BuiltinOpResolver;
 use tflite::{FlatBufferModel, Interpreter, InterpreterBuilder};
 use thiserror::Error;
 
+
+/// An enumeration of the possible errors that can occur from Precise.
 #[derive(Debug, Error)]
 pub enum PreciseError {
+    /// Model file couldn't be read.
     #[error("Couldn't open model file")]
     FileError(#[from]std::io::Error),
+
+    /// Params file couldn't be read.
     #[error("Couldn't open params file")]
     ParamsLoadError(std::io::Error),
+
+    /// Params file is not valid JSON.
     #[error("Params file is has bad structure or is not JSON")]
     ParamsJsonError(serde_json::Error),
+
+    /// Something happened while operating tflite.
     #[error("Failure while operating model")]
     TensorflowError(#[from]tflite::Error),
+
     #[error("Model is wrong")]
     ModelError
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 struct PreciseParams {
+    /// Input size of audio. Wakeword must fit within this time
     #[serde(default = "buffer_t_default")]
     buffer_t: f32,
+
+    /// Time of the window used to calculate a single spectrogram frame
     #[serde(default = "window_t_default")]
     window_t: f32,
+
+    /// Time the window advances forward to calculate the next spectrogram frame
     #[serde(default = "hop_t_default")]
     hop_t: f32,
+
+    /// Input audio sample rate
     #[serde(default = "sample_rate_default")]
     sample_rate: u16,
+
+    /// Bytes per input audio sample, two for 16 bit
     #[serde(default = "sample_depth_default")]
     sample_depth: u8,
+
+    /// Size of FFT to generate from audio frame
     #[serde(default = "n_fft_default")]
     n_fft: u16,
+
+    /// Number of filters to compress FFT to
     #[serde(default = "n_filt_default")]
     n_filt: u8,
+
+    /// Number of MFCC coefficients to use
     #[serde(default = "n_mfcc_default")]
     n_mfcc: u8,
+
+    /// If True, generates "delta vectors" before sending to network
     #[serde(default = "use_delta_default")]
     use_delta: bool,
+    
+    /// Output distribution configuration automatically generated from precise-calc-threshold
     #[serde(default = "threshold_config_default")]
     threshold_config: Vec<(f32, f32)>,
+
+    /// Output distribution center automatically generated from precise-calc-threshold
     #[serde(default = "threshold_center_default")]
     threshold_center: f32,
+
+    // The type of input fed into the network. Options listed in class Vectorizer
     //#[serde(default = "vectorizer_default")]
     //vectorizer: Vectorizer
 }
@@ -91,6 +124,7 @@ impl PreciseParams {
     }
 }
 
+/// The precise wakeword engine
 pub struct Precise {
     model: PreciseModel,
     mfccs: Array2<f32>,
@@ -101,6 +135,23 @@ pub struct Precise {
 
 
 impl Precise {
+    /// Create a new engine from a model file. **Note**: if the model file
+    /// "model.pb" is selected "model.pb.args" will be loaded as a JSON
+    /// containing all the parameters for the engine.
+    /// # Arguments
+    ///
+    /// * `model_path` - A path to the model that we want to be loeaded.
+    /// 
+    /// # Examples
+    /// 
+    /// ```should_panic
+    /// # use precise_rs::Precise;
+    /// #
+    /// // If "my-model.pb" or "my-model.pb.args"  don't exist, this will return an error
+    /// let mut precise = Precise::new("my-model.pb")?;
+    ///  # Ok::<(), precise_rs::PreciseError>(())
+    /// ```
+    /// 
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self, PreciseError> {
         let params = Self::load_params(model_path.as_ref())?;
 
@@ -151,7 +202,7 @@ impl Precise {
         Self::mfcc_spec(raw, params)
     }
 
-    ///Inserts extra features that are the difference between adjacent timesteps
+    /// Inserts extra features that are the difference between adjacent timesteps
     fn add_deltas(features: &Array2<f32>) -> Array2<f32> {
         /*let mut deltas = Array2::zeros(features.raw_dim());
         for i in 1..features.nrows() {
@@ -177,7 +228,38 @@ impl Precise {
         }
     }
 
+    /// Process audio, looks for the wakeword and returns how sure it is of the 
+    /// audio having the wake word in a range from 0 to 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `audio` - A slice of audio samples as i16.
+    /// # Examples
+    /// 
+    /// ```should_panic
+    /// # use precise_rs::Precise;
+    /// #
+    /// # fn load_samples() -> Vec<i16> {
+    /// #     let mut reader = hound::WavReader::open("test.wav").unwrap();
+    /// #     let samples: Vec<i16> = reader.samples().map(|e|e.unwrap()).collect();
+    /// #     samples
+    /// # }
+    /// #
+    /// // If "my-model.pb" or "my-model.pb.args"  don't exist, this will return an error
+    /// let mut precise = Precise::new("my-model.pb")?;
+    /// 
+    /// const WAKEWORD_THRESHOLD : f32 = 0.8;
+    ///
+    /// if precise.update(&load_samples()).unwrap() > 0.8 {
+    ///     println!("Wakeword recognized");
+    /// }
+    /// 
+    ///  # Ok::<(), precise_rs::PreciseError>(())
+    
 
+    /// ```
+    /// 
+    
     pub fn update(&mut self, audio: &[i16]) -> Result<f32, PreciseError> {
         self.update_vectors(audio);
         if self.params.use_delta {
@@ -188,6 +270,7 @@ impl Precise {
         Ok(out)
     }
 
+    /// Clears the engine's internal buffers.
     pub fn clear(&mut self) {
         self.window_audio.clear();
         self.mfccs = Array2::zeros((self.params.n_features() as usize, (self.params.n_mfcc as usize)*3));

@@ -1,10 +1,8 @@
-# Precise-rs
+# Tract-precise
 
 A reimplementation of the [precise](https://github.com/MycroftAI/mycroft-precise)
 by [Mycroft](https://mycroft.ai) hotword listener (just the decoder, though) 
-using [Rust](https://www.rust-lang.org/) and [tflite-rs](https://github.com/boncheolgu/tflite-rs).
-
-**NOTE:** While precise accepts three vectorizer operations *precise-rs* only replicates what the original names as `mfcc` as of now.
+using [Rust](https://www.rust-lang.org/) and [Tract](https://github.com/sonos/tract).
 
 # Usage
 
@@ -15,35 +13,42 @@ Add this to your `Cargo.toml`
 tract-precise = {git = "https://github.com/sheosi/tract-precise"}
 ```
 
-# Example
+# How it works
+
+A little example:
 
 ```rust
-use precise_rs::Precise;
+fn load_samples() -> Vec<i16> {
+    let mut reader = hound::WavReader::open("test.wav").unwrap();
+    let samples: Vec<i16> = reader.samples().map(|e|e.unwrap()).collect();
+    samples
+}
 
 fn main() {
-    let hotword_engine = Precise::new("my_precise_model.tflite");
-    let audio_input: &[i16] = get_audio_input();
-    let confidence = hotword_engine.update(audio_input);
-    if (confidence > 0.8) {
-        println!("Heard someone!!");
+    const WAKEWORD_THRESHOLD : f32 = 0.8;
+
+    let mut precise = Precise::new("hey-mycroft.pb").unwrap();
+
+    if precise.update(&load_samples()).unwrap() > 0.8 {
+        println!("Wakeword recognized");
     }
 }
 ```
 
-**NOTE:** Remember to also have `my_precise_model.tflite.params` next to `my_precise_model.tflite`.
-
-# How it works
-
-This is pretty much a reimplementation of the original [code](https://github.com/MycroftAI/mycroft-precise), it loads the model and gets the mfccs
+This example loads the `test.wav` Wav file and runs that audio through the `hey-mycroft.pb` tflite model, note that also `hey-mycroft.pb.args` needs to be present, which is the configuration for that model. You can find more info [here](https://github.com/sheosi/precise-rs/wiki/Arguments).
 
 # Obtaining the code
 
-This uses git LFS which means it needs to be cloned with that installed and ready beforehand.
+Before cloning you need to have git LFS (Large Files Storage).
 
 First install git LFS, for Debian/Ubuntu it is:
 
 ```shell
 sudo apt install git-lfs
+```
+For fedora: 
+```shell
+sudo dnf install git-lfs
 ```
 
 Then, no matter which OS you are under you need to initialize git LFS:
@@ -51,6 +56,17 @@ Then, no matter which OS you are under you need to initialize git LFS:
 ```shell
 git lfs install
 ```
+
+# What works what not
+
+## Vectorizer
+
+Only "mfcc" vectorizer is available and is one that's based very much like speechpy's, so anything using sonopy's mfcc vectorizer should work. This means that any model not requiring any vectorizer or setting it as "2" will work (that's speechpy's), any model using "1" should work (more testing is needed), and any model using "0" (mel_spec) won't work for now.
+
+
+## Delta
+
+Delta is not implemented right now.
 
 # License 
 Licensed under Apache License, Version 2.0, (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0).
