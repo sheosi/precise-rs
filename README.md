@@ -10,7 +10,7 @@ Add this to your `Cargo.toml`
 
 ```toml
 [dependencies]
-tract-precise = {git = "https://github.com/sheosi/tract-precise"}
+tract-precise = {git = "https://github.com/sheosi/precise-rs"}
 ```
 
 # How it works
