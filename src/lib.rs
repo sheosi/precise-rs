@@ -6,7 +6,11 @@ use std::path::Path;
 
 use serde_json::from_reader;
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature="new-mfcc"))]
 use mfcc::Transform;
+#[cfg(feature="new-mfcc")]
+use mfcc_2::mfcc;
+
 use ndarray::{Array1, Array2, Axis, concatenate, s};
 use tflite::ops::builtin::BuiltinOpResolver;
 use tflite::{FlatBufferModel, Interpreter, InterpreterBuilder};
@@ -38,39 +42,39 @@ pub enum PreciseError {
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 struct PreciseParams {
-    /// Input size of audio. Wakeword must fit within this time
+    /// Input size of audio. Wakeword must fit within this time.
     #[serde(default = "buffer_t_default")]
     buffer_t: f32,
 
-    /// Time of the window used to calculate a single spectrogram frame
+    /// Time of the window used to calculate a single spectrogram frame.
     #[serde(default = "window_t_default")]
     window_t: f32,
 
-    /// Time the window advances forward to calculate the next spectrogram frame
+    /// Time the window advances forward to calculate the next spectrogram frame.
     #[serde(default = "hop_t_default")]
     hop_t: f32,
 
-    /// Input audio sample rate
+    /// Input audio sample rate.
     #[serde(default = "sample_rate_default")]
     sample_rate: u16,
 
-    /// Bytes per input audio sample, two for 16 bit
+    /// Bytes per input audio sample, two for 16 bit.
     #[serde(default = "sample_depth_default")]
     sample_depth: u8,
 
-    /// Size of FFT to generate from audio frame
+    /// Size of FFT to generate from audio frame.
     #[serde(default = "n_fft_default")]
     n_fft: u16,
 
-    /// Number of filters to compress FFT to
+    /// Number of filters to compress FFT to.
     #[serde(default = "n_filt_default")]
     n_filt: u8,
 
-    /// Number of MFCC coefficients to use
+    /// Number of MFCC coefficients to use.
     #[serde(default = "n_mfcc_default")]
     n_mfcc: u8,
 
-    /// If True, generates "delta vectors" before sending to network
+    /// If true, generates "delta vectors" before sending to network
     #[serde(default = "use_delta_default")]
     use_delta: bool,
     
@@ -170,6 +174,7 @@ impl Precise {
         (window_size..samples.len()+1).step_by(hop_size).map(move |i| &samples[i - window_size..i])
     }
 
+    #[cfg(not(feature="new-mfcc"))]
     fn mfcc_spec(raw: &[i16], params: &PreciseParams) -> Array2<f32> {
         let out_mel_samples = params.n_mfcc.into();
         let samples= params.window_samples().try_into().unwrap();
@@ -196,6 +201,15 @@ impl Precise {
         let num_sets = (mels.len() as f32/(out_mel_samples) as f32).ceil() as usize;
 
         Array2::from_shape_vec((num_sets, out_mel_samples), mels).unwrap()
+    }
+
+    #[cfg(feature="new-mfcc")]
+    fn mfcc_spec(raw: &[i16], params: &PreciseParams) -> Array2<f32> {
+        use std::iter::FromIterator;
+        let x = Array1::from_iter(
+        raw.into_iter().map(|i|i as f64));
+
+        mfcc(x, params.sample_rate, params.window_samples(), params.hop_samples(), params.n_mfcc, params.n_filt, 512, 0, None, true).mapv(|f|f as f32)
     }
 
     fn vectorize_raw(raw: &[i16], params: &PreciseParams) -> Array2<f32> {
